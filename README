@@ -1,7 +1,14 @@
+libcommon
+
 Library of functions for writing robust shell scripts.
 
-The script includes extensive documentation because my idiot boss was
+This library includes extensive documentation because my idiot boss was
 worried that other unix sysadmins might not understand shell scripts.
+
+Put it in your $PATH (it doesn't need to be executable) and include it
+at the top of your script with:
+
+. libcommon
 
 Includes:
   Simple terminal output formatting (assumes the terminal is 'normal')

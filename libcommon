@@ -1,5 +1,24 @@
 # -*- sh -*- Tell emacs which mode we're in.
 
+# libcommon
+#
+# Library of functions for writing robust shell scripts.
+#
+# This library includes extensive documentation because my idiot boss was
+# worried that other unix sysadmins might not understand shell scripts.
+#
+# Put it in your $PATH (it doesn't need to be executable) and include it
+# at the top of your script with:
+#
+# . libcommon
+#
+# Includes:
+#   Simple terminal output formatting (assumes the terminal is 'normal')
+#   Logging, to stdout and/or syslog
+#   Locking
+#   Wrapper around trap "..." EXIT
+#
+
 
 # This library is split into pages.  Each page begins with a title
 # describing the functions in that section and ends with a line reading
