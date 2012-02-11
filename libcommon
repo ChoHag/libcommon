@@ -1,0 +1,372 @@
+# -*- sh -*- Tell emacs which mode we're in.
+
+
+# This library is split into pages.  Each page begins with a title
+# describing the functions in that section and ends with a line reading
+# '# ^L'.  '^L' is a single character, ascii 12 (0x0c), which separates
+# the document into pages when printed.  Get it in emacs or vi with the
+# key sequence ctrl-q ctrl-l.
+
+# Each function should begin with a comment describing its purpose and
+# usage.  Be brief, not wordy, or nobody will bother to read them.
+
+
+# A few notes on sh-isms which may be unfamiliar to the casual observer:
+#
+# * The expression ${VAR:-text} expands to the contents of $VAR or
+#    "text" if VAR is null.
+# * The expression ${VAR:+text} does the opposite - if VAR is not null
+#   then the expression expands to "text".
+#
+#   These expressions are generally used to deal with defaults if
+#   variables are not explicitely set.
+
+
+# To avoid explaining it in each function, here is how getopts works:
+
+## Nothing special is required in the function definition
+# func() {
+
+## Bash doesn't reset these so without making them local the function
+## only works once.
+#     local OPTIND OPTARG
+
+## Any variables which the options will be set should be made local to
+## avoid polluting the global namespace. Global variables are still
+## apparent though (see log).
+#     local ARGUMENT
+
+## getopts takes a string where:
+## * Each possible option is listed
+## * If the option is followed by a : it takes an argument, which is
+##   placed in OPTARG
+## * If the string begins with ':' then when an unknown argument is
+##   found, : is placed in arg and OPTARG is set to the invalid argument.
+#     while getopts "a:" arg; do
+# 	case $arg in
+
+## Each argument is listed in this fashion. In this case the variable
+## ARGUMENT is set, so calling this function as 'func -a test' would set
+## ARGUMENT to "test".
+# 	    a) ARGUMENT=$OPTARG ;;
+
+## If an unknown argument is encountered, and the argument string
+## doesn't begin with a ':', arg is set to '?':
+# 	    ?)
+## Print a usage report. 1>&2 directs to stderr.
+# 		echo "Usage: unlock [-l lockfile]" 1>&2
+## Return an error code so the calling script can quit
+# 		return 1
+# 		;;
+# 	esac
+#     done
+
+## After the arguments have been parsed, they must be removed from the
+## argument list so that remaining non-option arguments are all that's
+## in $@:
+#     shift $(expr $OPTIND - 1)
+
+## The function now does its work.
+#     if [ "$ARGUMENT" ]; then
+#         echo "func called with the option '$ARGUMENT' followed by '$@'."
+#     else
+#         echo "func called with no options and '$@'."
+#     fi
+# }
+
+
+#
+# General functions and globals
+#
+
+# For completeness they're all listed, but they should not be overused.
+# Probably you only want $BRIGHT$RED.
+#
+# DON'T forget $PLAIN the end.
+if [ "$BASH_VERSION" ]; then
+    # Bash needs $'' to interpret escape codes (ie. \033 == ESC)
+    PLAIN=$'\033[0m'  BRIGHT=$'\033[1m'   DULL=$'\033[22m'
+    BLACK=$'\033[30m' RED=$'\033[31m'     GREEN=$'\033[32m' YELLOW=$'\033[33m'
+    BLUE=$'\033[34m'  MAGENTA=$'\033[35m' CYAN=$'\033[36m'  WHITE=$'\033[37m'
+else
+    PLAIN='\033[0m'  BRIGHT='\033[1m'   DULL='\033[22m'
+    BLACK='\033[30m' RED='\033[31m'     GREEN='\033[32m' YELLOW='\033[33m'
+    BLUE='\033[34m'  MAGENTA='\033[35m' CYAN='\033[36m'  WHITE='\033[37m'
+fi
+
+# Centre text
+centre() {
+    # Get screen width.
+    local COLUMNS=`tput cols`
+
+    ( if [ "$@" ]; then echo "$@"; else cat; fi ) | awk '
+        { spaces = ('$COLUMNS' - length) / 2
+          while (spaces-- > 0) printf (" ")
+          print
+        }'
+}
+
+# Right-align text
+right() {
+    # Get screen width.
+    local COLUMNS=`tput cols`
+
+    ( if [ "$@" ]; then echo "$@"; else cat; fi ) | awk '
+        { spaces = '$COLUMNS' - length
+          while (spaces-- > 0) printf (" ")
+          print
+        }'
+}
+
+# For completeness, left-align text
+left() {
+    if [ "$@" ]; then echo "$@"; else cat; fi
+}
+
+# 
+
+#
+# Miscellaneous functions
+#
+
+# echo the date in the same format as syslog
+syslogdate() {
+    # LC_ALL=C to be sure we're in the system locale rather than some
+    # users'
+    LC_ALL=C date +"%b %e %H:%M:%S"
+}
+
+# Prepend the given command to the list of commands to run when the
+# shell exits
+if [ "$BASH_VERSION" ]; then
+    atexit() {
+	local trapexit
+	# Yes sed twice
+	trapexit=$(trap -p exit           \
+	    | sed "1{s/^trap -- '//}"     \
+	    | sed "\${s/' EXIT$//}")
+	trapexit="$@${trapexit:+; $trapexit}"
+	trap "$trapexit" EXIT
+    }
+else
+    atexit() {
+	ATEXIT="$@${ATEXIT:+; $ATEXIT}"
+	trap "eval \$ATEXIT" EXIT
+    }
+fi
+
+# Plain sh doesn't have arrays
+if [ "$BASH_VERSION" ]; then
+    # Append arguments to the array specified in the first argument
+    pusha() {
+	local array
+	array="$1"
+	shift
+	for val in "$@"; do
+	    eval $array\[\$\{\#$array\[\*\]\}\]=\""${val//\"/\\\"}"\"
+	done
+    }
+fi
+
+# 
+
+#
+# Locking functions
+#
+
+# Lock a section of code with a file
+# This file IS NOT DELETED AUTOMATICALLY
+#
+# Usage:
+#    lock [options]
+#
+# Options:
+#  -l : Lockfile.  Defaults to /var/lock/$(basename $0).lock
+#  -t : Time to wait for lock.  0 fails immediately.  Defaults to 0.
+
+lock() {
+    local OPTIND OPTARG # Bash needs this
+    local LOCKFILE TIMEOUT
+
+    while getopts "l:t:" arg; do
+	case $arg in
+	    l) LOCKFILE=$OPTARG ;;
+	    t) TIMEOUT="-r$OPTARG -1" ;; # Try 'retry-in-seconds' times,
+	                                 # every 1 second
+	    ?)
+		echo "Usage: lock [-l lockfile] [-t timeout]" 1>&2
+		return 1
+		;;
+	esac
+    done
+    shift $(expr $OPTIND - 1)
+
+    # First of: $1 or $LOCKFILE or /var/lock/$(basename -- $0).lock
+    lockfile ${TIMEOUT:--0 -r0}  \
+        "${1:-${LOCKFILE:-/var/lock/$(basename -- $0).lock}}"
+}
+
+# Unlock a section of code
+#
+# Usage:
+#    lock [options]
+#
+# Options:
+#  -l : Lockfile.  Defaults to /var/lock/$(basename $0).lock
+
+unlock() {
+    local OPTIND OPTARG # Bash needs this
+    local LOCKFILE
+
+    while getopts "l:" arg; do
+	case $arg in
+	    l) LOCKFILE=$OPTARG ;;
+
+	    ?)
+		echo "Usage: unlock [-l lockfile]" 1>&2
+		return 1
+		;;
+	esac
+    done
+    shift $(expr $OPTIND - 1)
+
+    # First of: $1 or $LOCKFILE or /var/lock/$(basename -- $0).lock
+    rm -f "${1:-${LOCKFILE:-/var/lock/$(basename -- $0).lock}}"
+}
+
+# 
+
+#
+# Logging functions
+#
+
+# Log message(s)
+#
+# Usage:
+#    log [options] [message]
+#
+# Options:
+#  -s : Duplicate to stderr.
+#  -o : Write to specified file instead of syslog.  Timestamps are
+#       not prepended.
+#
+# These options are ignored if logging to a file:
+#  -t : The name to tag the log with, defaults to $TAG or $(basename $0)
+#  -f : Log to the specified facility, defaults to $FACILITY or 'user'.
+#  -p : Log at the specified priority (eg. -debug, -emerg), defaults
+#       to $PRIORITY or 'notice'.
+#
+# Log the supplied message or the contents of stdin if none is supplied.
+
+log() {
+    local OPTIND OPTARG # Bash needs this
+    local LOGFILE
+    local TAG FACILITY PRIORITY
+
+    while getopts "sdo:t:f:p:" arg; do
+	case $arg in
+	    s) STD=1 ;;
+	    o) LOGFILE=$OPTARG ;;
+	    t) TAG=$OPTARG ;;
+	    f) FACILITY=$OPTARG ;;
+	    p) PRIORITY=$OPTARG ;;
+
+	    ?)
+		cat <<EOF 1>&2
+Usage: log [-s] [-o logfile] [-t tag] [-f facility] [-p priority] [message]
+
+If message is omitted, reads from stdin.
+
+tag, facility and priority default respectively to \$(basename \$0),
+"user" and "notice" and can be overridden by the environment variables
+\$TAG, \$FACILITY and \$PRIORITY.
+EOF
+		return 1
+		;;
+	esac
+    done
+    shift $(expr $OPTIND - 1)
+
+    if [ -n "$LOGFILE" ]; then
+	# Log to a logfile
+	if [ -n "$*" ]; then # "$@" expands to multiple arguments. Do not want.
+	    # A message is supplied
+	    if [ "$STD" ]; then
+		echo "$@" | tee -a "$LOGFILE"
+	    else
+		echo "$@" >> "$LOGFILE"
+	    fi
+	else
+	    # Read message from stdin
+	    if [ "$STD" ]; then
+		tee -a "$LOGFILE" 1>&2
+	    else
+		cat >> "$LOGFILE"
+	    fi
+	fi
+
+    else
+	# Log to syslog with all the specified information
+
+	logger -p ${FACILITY:-user}.${PRIORITY:-notice} \
+	    -t ${TAG:-$(basename -- $0)}                \
+            ${STD:+-s}                                  \
+	    -- "$@"
+    fi
+}
+
+# Log a message with priority 'err' and return an error
+#
+# If -e is set this will cause the script to exit, but then -e is always
+# set in your scripts, isn't it?
+#
+# Usage:
+#    error [options] [message]
+#
+# Options:
+#  All options are passed verbatim to log() except the first IF it is a
+#  number beginning with a -, in which case it is used as the exit
+#  status.  If none is supplied it defaults to 1.
+#
+# This function does not handle its arguments using getopts
+
+error() {
+    local STATUS
+
+    if echo ".$1" | grep -q '^\.-[0-9]*$'; then
+	STATUS=$(echo ".$1"|cut -d- -f2-)
+	shift
+    fi
+
+    log -s -perr "$@"
+    return ${STATUS:-1}
+}
+
+# Some shortcuts:
+
+# Log and echo a message in the same manner as log()
+stdlog() {
+    log -s "$@"
+}
+
+# Log an entry but only copy to stdout if $verbose is set
+verbose() {
+    if [ x"$verbose" = x -o x"$verbose" = x0 ]; then
+        log "$@"
+    else
+        log -s "$@"
+    fi
+}
+
+# Log a message in the same manner as log(), but set priority to debug
+# and only log if the environment variable DEBUG is set
+debug() {
+    if [ -z "$DEBUG" ]; then return 0; fi
+    log -pdebug "$@"
+}
+
+# 
+
+#
+# No more
+#

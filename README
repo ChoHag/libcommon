@@ -1,0 +1,11 @@
+Library of functions for writing robust shell scripts.
+
+The script includes extensive documentation because my idiot boss was
+worried that other unix sysadmins might not understand shell scripts.
+
+Includes:
+  Simple terminal output formatting (assumes the terminal is 'normal')
+  Logging, to stdout and/or syslog
+  Locking
+  Wrapper around trap "..." EXIT
+
